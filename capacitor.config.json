@@ -6,7 +6,7 @@
   "server": {
     "androidScheme": "https",
     "cleartext": true,
-    "url": "https://your-server-url.herokuapp.com"
+    "url": "https://web-production-e764d.up.railway.app/"
   },
   "android": {
     "allowMixedContent": true,
