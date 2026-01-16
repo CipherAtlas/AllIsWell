@@ -1,0 +1,16 @@
+{
+  "appId": "com.alliswell.app",
+  "appName": "All Is Well",
+  "webDir": "public",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true,
+    "url": "https://your-server-url.herokuapp.com"
+  },
+  "android": {
+    "allowMixedContent": true,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": true
+  }
+}

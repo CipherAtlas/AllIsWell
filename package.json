@@ -1,0 +1,29 @@
+{
+  "name": "all-is-well",
+  "version": "3.0.0",
+  "description": "Simple peer-to-peer wellness check-in app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "serve": "node server.js",
+    "build": "echo 'No build step needed'",
+    "test": "echo 'No tests configured'",
+    "cap:add": "npx cap add android",
+    "cap:sync": "npx cap sync",
+    "cap:open": "npx cap open android",
+    "cap:build": "cd android && ./gradlew assembleDebug"
+  },
+  "keywords": ["wellness", "check-in", "pwa", "peer-to-peer", "real-time"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.6.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.0.0",
+    "@capacitor/core": "^6.0.0",
+    "@capacitor/android": "^6.0.0"
+  }
+}
