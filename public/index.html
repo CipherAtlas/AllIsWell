@@ -19,10 +19,28 @@
                 <h1>All Is Well</h1>
             </div>
             <div class="content-compact">
+                <div class="welcome-section" id="welcomeSection" style="display: none;">
+                    <div class="help-box welcome-box">
+                        <h3>👋 Welcome!</h3>
+                        <p><strong>All Is Well</strong> helps you stay connected with loved ones through simple check-ins.</p>
+                        <p><strong>If someone will check on you:</strong> Choose "I want to be tracked" - you'll get a code to share.</p>
+                        <p><strong>If you're checking on someone:</strong> Choose "I want to track someone" - you'll enter their code.</p>
+                        <button id="btnDismissWelcome" class="btn btn-save" style="margin-top: 16px;">Got it, let's start</button>
+                    </div>
+                </div>
                 <div class="role-selection">
                     <h2>Choose Your Role</h2>
-                    <button id="btnTracked" class="btn btn-role">I want to be tracked</button>
-                    <button id="btnTracker" class="btn btn-role">I want to track someone</button>
+                    <div class="role-help-text">Tap the button that describes what you want to do:</div>
+                    <button id="btnTracked" class="btn btn-role">
+                        <span class="role-icon">📍</span>
+                        <span class="role-text">I want to be tracked</span>
+                        <span class="role-subtext">Someone will check on me</span>
+                    </button>
+                    <button id="btnTracker" class="btn btn-role">
+                        <span class="role-icon">👀</span>
+                        <span class="role-text">I want to track someone</span>
+                        <span class="role-subtext">I'll check on someone else</span>
+                    </button>
                 </div>
             </div>
             <div id="statusMessage" class="status-message" style="display: none;"></div>
@@ -38,9 +56,21 @@
             <div class="content-compact">
                 <div class="code-display">
                     <h2>Your Connection Code</h2>
-                    <div id="connectionCode" class="code-box">Generating...</div>
+                    <div class="code-container-wrapper">
+                        <div id="connectionCode" class="code-box">Generating...</div>
+                        <button id="btnCopyCode" class="btn-copy-code" title="Copy code" style="display: none;">
+                            📋 Copy
+                        </button>
+                    </div>
                     <p id="codeExpiration" class="code-hint" style="margin-top: 12px;"></p>
-                    <p class="code-hint">Share this code with the person who will track you</p>
+                    <div class="help-box">
+                        <p class="code-hint" style="margin: 0 0 12px 0;">
+                            <strong>📱 How to share:</strong><br>
+                            1. Tap the "Copy" button above<br>
+                            2. Send it via text message, email, or phone call<br>
+                            3. The person tracking you will enter this code in their app
+                        </p>
+                    </div>
                     <button id="btnGenerateCode" class="btn btn-secondary">Generate New Code</button>
                 </div>
             </div>
@@ -61,15 +91,20 @@
                 </div>
 
                 <div class="checkin-button-wrapper">
+                    <div class="checkin-help-text">
+                        <p>Tap the big button below to check in</p>
+                        <p class="checkin-help-subtext">This lets your tracker know you're okay</p>
+                    </div>
                     <button id="checkInBtn" class="btn-checkin-round">
                         <span class="btn-text">All Is Well</span>
                     </button>
+                    <p class="checkin-tap-hint">💡 Tap when you're doing well!</p>
                 </div>
 
                 <div class="info-compact">
                     <div class="info-row">
                         <span class="info-label">Status:</span>
-                        <span id="connectionStatus" class="info-value">Waiting for tracker...</span>
+                        <span id="connectionStatus" class="info-value connection-status-display">Waiting for tracker...</span>
                     </div>
                     <div class="info-row">
                         <span class="info-label">Last check-in:</span>
@@ -88,19 +123,45 @@
                 <div style="width: 40px;"></div>
             </div>
             <div class="content-compact">
+                <div class="help-box" style="margin-bottom: 24px;">
+                    <p class="code-hint" style="margin: 0;">
+                        <strong>⚙️ About these settings:</strong><br>
+                        Set how often you want reminders and when your tracker should be notified if you forget to check in.
+                    </p>
+                </div>
                 <form id="settingsForm" class="form-compact">
                     <div class="form-group-compact">
-                        <label for="reminderTimeMinutes">Reminder Time for You (Minutes)</label>
-                        <input type="number" id="reminderTimeMinutes" min="1" max="1440" step="1" required placeholder="30" value="30">
-                        <div class="form-help-text">When you should be reminded to check in</div>
+                        <label for="reminderTimeHours">Reminder Time for You (Hours)</label>
+                        <input type="number" id="reminderTimeHours" min="0.5" max="24" step="0.5" required placeholder="0.5" value="0.5">
+                        <div class="form-help-text">After this time, you'll get a reminder to check in. Example: 0.5 = 30 minutes, 1 = 1 hour</div>
                     </div>
                     <div class="form-group-compact">
-                        <label for="alertTimeMinutes">Alert Time for Tracker (Minutes)</label>
-                        <input type="number" id="alertTimeMinutes" min="1" max="1440" step="1" required placeholder="60" value="60">
-                        <div class="form-help-text">When the tracker should be alerted if you haven't checked in</div>
+                        <label for="alertTimeHours">Alert Time for Tracker (Hours)</label>
+                        <input type="number" id="alertTimeHours" min="0.5" max="24" step="0.5" required placeholder="1" value="1">
+                        <div class="form-help-text">If you don't check in by this time, your tracker will be alerted. Must be longer than reminder time.</div>
                     </div>
                     <button type="submit" class="btn btn-save">Save Settings</button>
                 </form>
+            </div>
+            <div id="statusMessage" class="status-message" style="display: none;"></div>
+        </div>
+
+        <!-- Tracker - Home Screen (Contacts List) -->
+        <div id="trackerHomeScreen" class="screen" style="display: none;">
+            <div class="header-compact">
+                <h1>All Is Well</h1>
+                <button id="btnAddContact" class="btn-edit">+</button>
+            </div>
+            <div class="content-compact">
+                <div class="contacts-list-wrapper">
+                    <h2 class="contacts-title">My Contacts</h2>
+                    <div id="contactsList" class="contacts-list">
+                        <!-- Contacts will be dynamically added here -->
+                    </div>
+                    <button id="btnAddContactFromHome" class="btn btn-save" style="margin-top: 20px;">
+                        + Add New Contact
+                    </button>
+                </div>
             </div>
             <div id="statusMessage" class="status-message" style="display: none;"></div>
         </div>
@@ -109,26 +170,42 @@
         <div id="trackerCodeScreen" class="screen" style="display: none;">
             <div class="header-compact">
                 <button id="backFromTrackerCode" class="btn-close">←</button>
-                <h1>All Is Well</h1>
+                <h1>Add Contact</h1>
                 <div style="width: 40px;"></div>
             </div>
             <div class="content-compact">
                 <div class="code-entry">
                     <h2>Enter Connection Code</h2>
-                    <input type="text" id="trackerCodeInput" class="code-input" placeholder="Enter code" maxlength="6">
-                    <button id="btnConnectTracker" class="btn btn-save">Connect</button>
-                    <p class="code-hint">Get the code from the person you want to track</p>
+                    <div class="help-box">
+                        <p class="code-hint" style="margin: 0 0 12px 0;">
+                            <strong>📝 Instructions:</strong><br>
+                            Ask the person you want to track for their 6-digit code. They can find it in their app.
+                        </p>
+                    </div>
+                    <div class="form-group-compact">
+                        <label for="contactNameInput">Contact Name (Optional but recommended)</label>
+                        <input type="text" id="contactNameInput" class="form-group-compact input" placeholder="e.g., Mom, Dad, Friend" maxlength="50">
+                        <div class="form-help-text">This helps you remember who this is</div>
+                    </div>
+                    <label for="trackerCodeInput" style="font-size: 0.875rem; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px; display: block;">
+                        Enter the 6-digit code:
+                    </label>
+                    <input type="text" id="trackerCodeInput" class="code-input" placeholder="123456" maxlength="6" inputmode="numeric" pattern="[0-9]*">
+                    <button id="btnConnectTracker" class="btn btn-save">
+                        <span class="btn-text-inner">Add Contact</span>
+                        <span class="btn-loading-spinner" style="display: none;">⏳</span>
+                    </button>
                 </div>
             </div>
             <div id="statusMessage" class="status-message" style="display: none;"></div>
         </div>
 
-        <!-- Tracker - Main Interface -->
+        <!-- Tracker - Contact Detail View -->
         <div id="trackerInterface" class="screen" style="display: none;">
             <div class="header-compact">
                 <button id="backFromTracker" class="btn-close">←</button>
-                <h1>Tracking</h1>
-                <div style="width: 40px;"></div>
+                <h1 id="trackerContactName">Tracking</h1>
+                <button id="btnEditContact" class="btn-edit">✎</button>
             </div>
             <div class="content-compact">
                 <div class="tracker-status">
@@ -142,11 +219,29 @@
                     </div>
                     <div id="alertCard" class="alert-card" style="display: none;">
                         <h3>⚠️ Alert</h3>
-                        <p>Check-in missed! Please check on the person you're tracking.</p>
+                        <p>Check-in missed! Please check on this person.</p>
                     </div>
                 </div>
             </div>
             <div id="statusMessage" class="status-message" style="display: none;"></div>
+        </div>
+
+        <!-- Edit Contact Modal -->
+        <div id="editContactModal" class="checkin-popup" style="display: none;">
+            <div class="popup-content" style="max-width: 400px;">
+                <h2 class="popup-title" style="margin-bottom: 24px;">Edit Contact</h2>
+                <form id="editContactForm" class="form-compact">
+                    <div class="form-group-compact">
+                        <label for="editContactNameInput">Contact Name</label>
+                        <input type="text" id="editContactNameInput" class="form-group-compact input" placeholder="Enter name" maxlength="50" required style="font-size: 1rem; padding: 14px 18px;">
+                    </div>
+                    <div style="display: flex; gap: 12px; margin-top: 8px;">
+                        <button type="button" id="btnDeleteContact" class="btn btn-secondary" style="flex: 1; background: var(--error); color: white;">Delete</button>
+                        <button type="submit" class="btn btn-save" style="flex: 1;">Save</button>
+                    </div>
+                    <button type="button" id="btnCancelEdit" class="btn btn-secondary" style="margin-top: 12px;">Cancel</button>
+                </form>
+            </div>
         </div>
 
         <!-- Check-in Success Popup -->
@@ -156,6 +251,14 @@
                 <h2 class="popup-title">Check-in successful!</h2>
                 <p class="popup-message">Your tracker has been notified.</p>
                 <button id="closePopupBtn" class="btn btn-popup-close">OK</button>
+            </div>
+        </div>
+
+        <!-- Loading Overlay -->
+        <div id="loadingOverlay" class="loading-overlay" style="display: none;">
+            <div style="text-align: center;">
+                <div class="loading-spinner"></div>
+                <div class="loading-message">Loading...</div>
             </div>
         </div>
     </div>

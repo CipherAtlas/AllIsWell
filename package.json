@@ -12,7 +12,8 @@
     "cap:add": "npx cap add android",
     "cap:sync": "npx cap sync",
     "cap:open": "npx cap open android",
-    "cap:build": "cd android && ./gradlew assembleDebug"
+    "cap:build": "cd android && ./gradlew assembleDebug",
+    "cap:assets": "node generate-assets.js"
   },
   "keywords": [
     "wellness",

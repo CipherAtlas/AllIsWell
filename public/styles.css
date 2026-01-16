@@ -267,6 +267,21 @@ body {
     justify-content: center;
     padding: 0;
     position: relative;
+    min-width: 180px;
+    min-height: 180px;
+    touch-action: manipulation;
+}
+
+.btn-checkin-round::after {
+    content: '';
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    background: white;
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
 }
 
 .btn-checkin-round::before {
@@ -291,8 +306,24 @@ body {
 }
 
 .btn-checkin-round:active {
-    transform: scale(0.95);
+    transform: scale(0.92);
     box-shadow: 0 4px 16px rgba(255, 153, 153, 0.3);
+}
+
+.btn-checkin-round:active::after {
+    opacity: 0.3;
+    animation: ripple 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes ripple {
+    0% {
+        transform: scale(1);
+        opacity: 0.3;
+    }
+    100% {
+        transform: scale(1.5);
+        opacity: 0;
+    }
 }
 
 .btn-checkin-round:disabled {
@@ -341,6 +372,75 @@ body {
 .info-value {
     color: var(--text-primary);
     font-weight: 600;
+}
+
+.connection-status-display {
+    padding: 4px 12px;
+    border-radius: 12px;
+    background: var(--bg-tertiary);
+    font-size: 0.9375rem;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.connection-status-display:has-text("Connected"),
+.connection-status-display:contains("Connected") {
+    background: rgba(141, 212, 184, 0.2);
+    color: var(--success);
+}
+
+/* Improve button tap targets for elderly users */
+.btn, .btn-role, .btn-checkin-round, .btn-edit, .btn-close {
+    min-height: 48px;
+    min-width: 48px;
+    touch-action: manipulation;
+}
+
+/* Larger touch targets on mobile */
+@media (max-width: 480px) {
+    .btn, .btn-role {
+        min-height: 56px;
+        padding: 20px 28px;
+    }
+    
+    .btn-checkin-round {
+        min-width: 160px;
+        min-height: 160px;
+    }
+    
+    .btn-edit, .btn-close {
+        min-width: 48px;
+        min-height: 48px;
+        padding: 12px;
+    }
+}
+
+/* Better focus indicators for accessibility */
+*:focus-visible {
+    outline: 3px solid var(--accent-lavender);
+    outline-offset: 2px;
+    border-radius: 4px;
+}
+
+/* Improve readability */
+.info-label, .form-help-text, .code-hint {
+    line-height: 1.6;
+    font-size: 0.9375rem;
+}
+
+/* Status indicator improvements */
+.status-indicator.connected {
+    color: var(--success);
+    font-weight: 700;
+}
+
+.status-indicator.disconnected {
+    color: var(--error-dark);
+    font-weight: 700;
+}
+
+.status-indicator.connecting {
+    color: var(--warning);
+    font-weight: 700;
 }
 
 /* Buttons */
@@ -512,6 +612,14 @@ body {
     margin-bottom: 30px;
 }
 
+.code-container-wrapper {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+}
+
 .code-box {
     font-size: 3.5rem;
     font-weight: 700;
@@ -528,6 +636,178 @@ body {
     text-align: center;
     min-width: 280px;
     box-shadow: 0 8px 24px rgba(184, 169, 212, 0.2);
+    position: relative;
+}
+
+.btn-copy-code {
+    background: var(--btn-primary);
+    color: white;
+    border: none;
+    padding: 12px 24px;
+    border-radius: 16px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 4px 12px rgba(184, 169, 212, 0.3);
+    min-width: 140px;
+}
+
+.btn-copy-code:hover {
+    background: var(--btn-primary-hover);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(184, 169, 212, 0.4);
+}
+
+.btn-copy-code:active {
+    transform: translateY(0);
+}
+
+.btn-copy-code.copied {
+    background: var(--success);
+    animation: copySuccess 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes copySuccess {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.1); }
+}
+
+.help-box {
+    background: var(--bg-card);
+    border: 2px solid var(--accent-blue);
+    border-radius: 20px;
+    padding: 20px;
+    margin: 16px 0;
+    box-shadow: 0 4px 12px rgba(184, 212, 255, 0.2);
+}
+
+.help-box p {
+    color: var(--text-primary);
+    font-size: 0.9375rem;
+    line-height: 1.6;
+    margin: 0;
+}
+
+.welcome-section {
+    margin-bottom: 32px;
+}
+
+.welcome-box {
+    background: linear-gradient(135deg, var(--bg-card) 0%, rgba(184, 169, 212, 0.1) 100%);
+    border-color: var(--accent-lavender);
+}
+
+.welcome-box h3 {
+    font-size: 1.5rem;
+    color: var(--text-primary);
+    margin-bottom: 12px;
+}
+
+.role-help-text {
+    font-size: 0.9375rem;
+    color: var(--text-secondary);
+    text-align: center;
+    margin-bottom: 20px;
+    line-height: 1.6;
+}
+
+.role-icon {
+    font-size: 2rem;
+    display: block;
+    margin-bottom: 8px;
+}
+
+.role-text {
+    display: block;
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.role-subtext {
+    display: block;
+    font-size: 0.875rem;
+    font-weight: 400;
+    opacity: 0.8;
+    font-style: italic;
+}
+
+.checkin-help-text {
+    text-align: center;
+    margin-bottom: 24px;
+}
+
+.checkin-help-text p {
+    font-size: 1rem;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+    font-weight: 500;
+}
+
+.checkin-help-subtext {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    margin-top: 4px !important;
+}
+
+.checkin-tap-hint {
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 0.9375rem;
+    margin-top: 16px;
+    font-style: italic;
+}
+
+.btn-loading-spinner {
+    display: inline-block;
+    margin-left: 8px;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none !important;
+}
+
+.loading-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(255, 255, 255, 0.9);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+    backdrop-filter: blur(4px);
+}
+
+.loading-overlay.active {
+    display: flex;
+}
+
+.loading-spinner {
+    width: 60px;
+    height: 60px;
+    border: 4px solid var(--border-light);
+    border-top-color: var(--accent-lavender);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+.loading-message {
+    margin-top: 20px;
+    font-size: 1.125rem;
+    color: var(--text-primary);
+    font-weight: 500;
 }
 
 .code-input {
@@ -849,4 +1129,125 @@ body {
 .btn, .btn-checkin-round, .btn-edit {
     user-select: none;
     -webkit-user-select: none;
+}
+
+/* Contacts List */
+.contacts-list-wrapper {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.contacts-title {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 8px;
+}
+
+.contacts-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.empty-state {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+.contact-item {
+    background: var(--bg-card);
+    border: 2px solid var(--border-light);
+    border-radius: 20px;
+    padding: 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 2px 8px rgba(186, 169, 212, 0.1);
+    cursor: pointer;
+}
+
+.contact-item:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(186, 169, 212, 0.2);
+    border-color: var(--accent-lavender);
+}
+
+.contact-item.contact-alert {
+    border-color: var(--error-dark);
+    background: linear-gradient(135deg, var(--bg-card) 0%, rgba(255, 179, 179, 0.1) 100%);
+}
+
+.contact-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.contact-name {
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 8px;
+    word-break: break-word;
+}
+
+.contact-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+}
+
+.contact-code {
+    font-family: 'SF Mono', 'Monaco', 'Courier New', monospace;
+    letter-spacing: 1px;
+}
+
+.contact-status {
+    font-weight: 600;
+}
+
+.contact-checkin {
+    font-size: 0.8125rem;
+    color: var(--text-tertiary);
+    margin-top: 8px;
+}
+
+.contact-actions {
+    display: flex;
+    gap: 8px;
+    margin-left: 12px;
+}
+
+.btn-icon-small {
+    background: var(--bg-tertiary);
+    border: 2px solid var(--border-light);
+    color: var(--text-secondary);
+    padding: 8px 12px;
+    border-radius: 12px;
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    min-width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.btn-icon-small:hover {
+    background: var(--accent-lavender);
+    color: white;
+    border-color: var(--accent-lavender);
+    transform: scale(1.05);
+}
+
+.btn-icon-small:active {
+    transform: scale(0.95);
 }

@@ -19,7 +19,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Store code mappings: code -> { trackedSocketId: string | null, trackerSocketId: string | null, sessionToken: string | null, expiresAt: timestamp, isConnected: boolean }
 const codes = new Map();
 
-// Store session mappings: sessionToken -> { trackedSocketId: string | null, trackerSocketId: string | null, lastCheckIn: timestamp, reminderTimeMinutes: number, alertTimeMinutes: number, reminderTimeEnd: timestamp, alertTimeEnd: timestamp, settingsConfigured: boolean }
+// Store session mappings: sessionToken -> { trackedSocketId: string | null, trackerSocketIds: string[], lastCheckIn: timestamp, reminderTimeMinutes: number, alertTimeMinutes: number, reminderTimeEnd: timestamp, alertTimeEnd: timestamp, settingsConfigured: boolean }
 const sessions = new Map();
 
 // Store pending alerts: sessionToken -> { timestamp, message }
@@ -142,7 +142,14 @@ io.on('connection', (socket) => {
       sessionData.trackedSocketId = socket.id;
       socket.emit('sessionReconnected', { sessionToken, role: 'tracked' });
     } else if (role === 'tracker') {
-      sessionData.trackerSocketId = socket.id;
+      // Initialize trackerSocketIds array if it doesn't exist
+      if (!sessionData.trackerSocketIds) {
+        sessionData.trackerSocketIds = [];
+      }
+      // Add this tracker if not already in the array
+      if (!sessionData.trackerSocketIds.includes(socket.id)) {
+        sessionData.trackerSocketIds.push(socket.id);
+      }
       socket.emit('sessionReconnected', { sessionToken, role: 'tracker' });
       
       // Send any pending alerts
@@ -204,7 +211,7 @@ io.on('connection', (socket) => {
       // Create session entry
       sessions.set(sessionToken, {
         trackedSocketId: codeData.trackedSocketId,
-        trackerSocketId: socket.id,
+        trackerSocketIds: [socket.id], // Array to support multiple trackers
         lastCheckIn: null,
         reminderTimeMinutes: null,
         alertTimeMinutes: null,
@@ -219,7 +226,15 @@ io.on('connection', (socket) => {
       const sessionData = sessions.get(sessionToken);
       if (sessionData) {
         sessionData.trackedSocketId = codeData.trackedSocketId;
-        sessionData.trackerSocketId = socket.id;
+        // Initialize trackerSocketIds array if it doesn't exist
+        if (!sessionData.trackerSocketIds) {
+          sessionData.trackerSocketIds = [];
+        }
+        // Add this tracker if not already in the array
+        if (!sessionData.trackerSocketIds.includes(socket.id)) {
+          sessionData.trackerSocketIds.push(socket.id);
+          console.log(`New tracker added to session ${sessionToken}, total trackers: ${sessionData.trackerSocketIds.length}`);
+        }
       }
     }
     
@@ -236,21 +251,19 @@ io.on('connection', (socket) => {
         // Even on reconnection, they need to know the connection is active
         trackedSocket.emit('trackerConnected', { sessionToken });
         
-        // On reconnection, also send current state to tracker (not tracked person)
-        if (wasReconnecting) {
-          const sessionData = sessions.get(sessionToken);
-          if (sessionData && sessionData.lastCheckIn) {
-            socket.emit('checkInReceived', { sessionToken, timestamp: sessionData.lastCheckIn });
-          }
+        // On reconnection, also send current state to this tracker
+        const sessionDataCheck = sessions.get(sessionToken);
+        if (sessionDataCheck && sessionDataCheck.lastCheckIn) {
+          socket.emit('checkInReceived', { sessionToken, timestamp: sessionDataCheck.lastCheckIn });
         }
       }
     }
     
-    // Send any pending alerts
+    // Send any pending alerts to this tracker
     if (pendingAlerts.has(sessionToken)) {
       const alert = pendingAlerts.get(sessionToken);
       socket.emit('checkInMissed', { sessionToken, timestamp: alert.timestamp });
-      pendingAlerts.delete(sessionToken);
+      // Note: Don't delete pending alerts - other trackers might also need them
     }
     
     if (wasReconnecting) {
@@ -309,10 +322,18 @@ io.on('connection', (socket) => {
       const newAlertTimeEnd = now + (alertMinutes * 60 * 1000);
       const alertTimer = setTimeout(() => {
         const currentSessionData = sessions.get(sessionToken);
-        if (currentSessionData && currentSessionData.trackerSocketId) {
-          const trackerSocket = io.sockets.sockets.get(currentSessionData.trackerSocketId);
-          if (trackerSocket) {
-            trackerSocket.emit('checkInMissed', { sessionToken, timestamp: Date.now() });
+        if (currentSessionData && currentSessionData.trackerSocketIds && currentSessionData.trackerSocketIds.length > 0) {
+          // Notify ALL trackers
+          let notifiedAny = false;
+          currentSessionData.trackerSocketIds.forEach(trackerSocketId => {
+            const trackerSocket = io.sockets.sockets.get(trackerSocketId);
+            if (trackerSocket) {
+              trackerSocket.emit('checkInMissed', { sessionToken, timestamp: Date.now() });
+              notifiedAny = true;
+            }
+          });
+          if (!notifiedAny) {
+            pendingAlerts.set(sessionToken, { timestamp: Date.now() });
           }
         } else {
           pendingAlerts.set(sessionToken, { timestamp: Date.now() });
@@ -342,12 +363,14 @@ io.on('connection', (socket) => {
       sessionData.alertTimeEnd = null;
     }
     
-    // Notify tracker if connected
-    if (sessionData.trackerSocketId) {
-      const trackerSocket = io.sockets.sockets.get(sessionData.trackerSocketId);
-      if (trackerSocket) {
-        trackerSocket.emit('checkInReceived', { sessionToken, timestamp: now });
-      }
+    // Notify ALL trackers if connected
+    if (sessionData.trackerSocketIds && sessionData.trackerSocketIds.length > 0) {
+      sessionData.trackerSocketIds.forEach(trackerSocketId => {
+        const trackerSocket = io.sockets.sockets.get(trackerSocketId);
+        if (trackerSocket) {
+          trackerSocket.emit('checkInReceived', { sessionToken, timestamp: now });
+        }
+      });
     }
     
     sessions.set(sessionToken, sessionData);
@@ -401,10 +424,18 @@ io.on('connection', (socket) => {
     const alertTimeEnd = lastCheckIn + (alertTimeMinutes * 60 * 1000);
     const alertTimer = setTimeout(() => {
       const currentSessionData = sessions.get(sessionToken);
-      if (currentSessionData && currentSessionData.trackerSocketId) {
-        const trackerSocket = io.sockets.sockets.get(currentSessionData.trackerSocketId);
-        if (trackerSocket) {
-          trackerSocket.emit('checkInMissed', { sessionToken, timestamp: Date.now() });
+      if (currentSessionData && currentSessionData.trackerSocketIds && currentSessionData.trackerSocketIds.length > 0) {
+        // Notify ALL trackers
+        let notifiedAny = false;
+        currentSessionData.trackerSocketIds.forEach(trackerSocketId => {
+          const trackerSocket = io.sockets.sockets.get(trackerSocketId);
+          if (trackerSocket) {
+            trackerSocket.emit('checkInMissed', { sessionToken, timestamp: Date.now() });
+            notifiedAny = true;
+          }
+        });
+        if (!notifiedAny) {
+          pendingAlerts.set(sessionToken, { timestamp: Date.now() });
         }
       } else {
         // Store alert for when tracker connects
@@ -436,20 +467,23 @@ io.on('connection', (socket) => {
       if (sessionData.trackedSocketId === socket.id) {
         // Tracked person disconnected
         sessionData.trackedSocketId = null;
-        // If tracker is still connected, notify them
-        if (sessionData.trackerSocketId) {
-          const trackerSocket = io.sockets.sockets.get(sessionData.trackerSocketId);
-          if (trackerSocket) {
-            trackerSocket.emit('trackedPersonDisconnected');
-          }
+        // If any trackers are still connected, notify them
+        if (sessionData.trackerSocketIds && sessionData.trackerSocketIds.length > 0) {
+          sessionData.trackerSocketIds.forEach(trackerSocketId => {
+            const trackerSocket = io.sockets.sockets.get(trackerSocketId);
+            if (trackerSocket) {
+              trackerSocket.emit('trackedPersonDisconnected');
+            }
+          });
         }
         sessions.set(sessionToken, sessionData);
         break;
-      } else if (sessionData.trackerSocketId === socket.id) {
-        // Tracker disconnected
-        sessionData.trackerSocketId = null;
-        // If tracked person is still connected, notify them
-        if (sessionData.trackedSocketId) {
+      } else if (sessionData.trackerSocketIds && sessionData.trackerSocketIds.includes(socket.id)) {
+        // Tracker disconnected - remove from array
+        sessionData.trackerSocketIds = sessionData.trackerSocketIds.filter(id => id !== socket.id);
+        
+        // If tracked person is still connected and this was the last tracker, notify them
+        if (sessionData.trackedSocketId && sessionData.trackerSocketIds.length === 0) {
           const trackedSocket = io.sockets.sockets.get(sessionData.trackedSocketId);
           if (trackedSocket) {
             // Only notify if this looks like a permanent disconnection
@@ -469,8 +503,17 @@ io.on('connection', (socket) => {
       if (codeData.trackedSocketId === socket.id) {
         // Tracked person disconnected
         codeData.trackedSocketId = null;
-        // If tracker is still connected, keep code active
-        if (codeData.trackerSocketId) {
+        // Check if any trackers are still connected in the session
+        if (codeData.sessionToken) {
+          const sessionData = sessions.get(codeData.sessionToken);
+          if (sessionData && sessionData.trackerSocketIds && sessionData.trackerSocketIds.length > 0) {
+            // Keep isConnected = true so code doesn't expire - there are still trackers
+          } else {
+            // No trackers connected - allow code to expire
+            codeData.isConnected = false;
+          }
+        } else if (codeData.trackerSocketId) {
+          // Fallback for old code mapping structure
           // Keep isConnected = true so code doesn't expire
         } else {
           // Both disconnected - allow code to expire
@@ -479,10 +522,17 @@ io.on('connection', (socket) => {
         codes.set(code, codeData);
         break;
       } else if (codeData.trackerSocketId === socket.id) {
-        // Tracker disconnected
+        // Tracker disconnected (for code mapping - check session for all trackers)
         codeData.trackerSocketId = null;
-        // Only mark as disconnected if both are disconnected
-        if (!codeData.trackedSocketId) {
+        // Check if any trackers are still connected in the session
+        if (codeData.sessionToken) {
+          const sessionData = sessions.get(codeData.sessionToken);
+          if (sessionData && sessionData.trackerSocketIds && sessionData.trackerSocketIds.length > 0) {
+            // Still have trackers - keep connected
+          } else if (!codeData.trackedSocketId) {
+            codeData.isConnected = false; // No trackers and no tracked person
+          }
+        } else if (!codeData.trackedSocketId) {
           codeData.isConnected = false; // Both disconnected, allow code to expire
         }
         codes.set(code, codeData);
