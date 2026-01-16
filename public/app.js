@@ -132,7 +132,11 @@ function connectSocket() {
     });
 
     socket.on('connect', () => {
-        console.log('Connected to server, socket ID:', socket.id);
+        // Socket ID may not be available immediately, log it with a small delay
+        setTimeout(() => {
+            console.log('Connected to server, socket ID:', socket.id);
+        }, 100);
+        
         // Always re-establish connection state when socket connects (including reconnects)
         if (sessionToken) {
             // If we have a sessionToken, use it to reconnect
@@ -214,8 +218,7 @@ function connectSocket() {
                 console.warn('No sessionToken available, connection may not persist properly');
             }
         }
-        connectionStatus.textContent = 'Tracker connected';
-        connectionStatus.style.color = '#28a745';
+        
         // Stop code refresh and expiration display - connection is established
         stopCodeRefreshTimer();
         stopCodeExpirationDisplay();
@@ -227,14 +230,26 @@ function connectSocket() {
         // Start keep-alive mechanism
         startKeepAlive();
         
-        // Show settings screen if not configured
+        // Switch to main interface first
+        showScreen('trackedInterface');
+        
+        // Update connection status
+        connectionStatus.textContent = 'Tracker connected';
+        connectionStatus.style.color = '#28a745';
+        
+        // Show settings screen if not configured, otherwise show success message
         if (!settingsConfigured) {
             showStatus('Tracker connected! Please configure your alert times.', 'success');
+            // Show settings after a brief moment
             setTimeout(() => {
                 showScreen('trackedSettings');
             }, 1500);
         } else {
             showStatus('Tracker connected!', 'success');
+            // Start timers if they were previously configured
+            if (reminderTimeEnd || alertTimeEnd) {
+                startLocalTimers();
+            }
         }
         console.log('Tracker connected - connection established, sessionToken:', sessionToken);
     });

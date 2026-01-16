@@ -11,6 +11,8 @@
   "android": {
     "allowMixedContent": true,
     "captureInput": true,
-    "webContentsDebuggingEnabled": true
+    "webContentsDebuggingEnabled": true,
+    "iconBackgroundColor": "#fefefe",
+    "iconResource": "ic_launcher"
   }
 }

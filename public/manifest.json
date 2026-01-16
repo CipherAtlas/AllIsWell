@@ -4,8 +4,8 @@
   "description": "Free wellness check-in app with automatic email alerts",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#4a5568",
+  "background_color": "#fefefe",
+  "theme_color": "#b8a9d4",
   "orientation": "portrait",
   "icons": [
     {
