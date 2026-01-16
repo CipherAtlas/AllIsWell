@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
@@ -15,16 +16,19 @@ const io = socketIo(server, {
 // Serve static files from public directory
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Store code mappings: code -> { trackedSocketId: string | null, trackerSocketId: string | null, lastCheckIn: timestamp, reminderTimeMinutes: number, alertTimeMinutes: number, reminderTimeEnd: timestamp, alertTimeEnd: timestamp, expiresAt: timestamp, isConnected: boolean, settingsConfigured: boolean }
+// Store code mappings: code -> { trackedSocketId: string | null, trackerSocketId: string | null, sessionToken: string | null, expiresAt: timestamp, isConnected: boolean }
 const codes = new Map();
 
-// Store pending alerts: code -> { timestamp, message }
+// Store session mappings: sessionToken -> { trackedSocketId: string | null, trackerSocketId: string | null, lastCheckIn: timestamp, reminderTimeMinutes: number, alertTimeMinutes: number, reminderTimeEnd: timestamp, alertTimeEnd: timestamp, settingsConfigured: boolean }
+const sessions = new Map();
+
+// Store pending alerts: sessionToken -> { timestamp, message }
 const pendingAlerts = new Map();
 
-// Store reminder timers by code: code -> timer instance (for tracked person)
+// Store reminder timers by sessionToken: sessionToken -> timer instance (for tracked person)
 const reminderTimers = new Map();
 
-// Store alert timers by code: code -> timer instance (for tracker)
+// Store alert timers by sessionToken: sessionToken -> timer instance (for tracker)
 const alertTimers = new Map();
 
 // Store code expiration timers: code -> timeout instance
@@ -40,6 +44,11 @@ function generateUniqueCode() {
     code = Math.floor(100000 + Math.random() * 900000).toString();
   } while (activeCodes.has(code));
   return code;
+}
+
+// Generate secure session token
+function generateSessionToken() {
+  return crypto.randomBytes(32).toString('hex');
 }
 
 // Clean up expired code
@@ -72,7 +81,20 @@ io.on('connection', (socket) => {
         // Already connected, just update socket ID
         existing.trackedSocketId = socket.id;
         codes.set(code, existing);
-        socket.emit('codeRegistered', { code, expiresAt });
+        
+        // If there's a sessionToken, update the session and send it back
+        if (existing.sessionToken) {
+          const sessionData = sessions.get(existing.sessionToken);
+          if (sessionData) {
+            sessionData.trackedSocketId = socket.id;
+            sessions.set(existing.sessionToken, sessionData);
+            socket.emit('codeRegistered', { code, expiresAt, sessionToken: existing.sessionToken });
+          } else {
+            socket.emit('codeRegistered', { code, expiresAt });
+          }
+        } else {
+          socket.emit('codeRegistered', { code, expiresAt });
+        }
         return;
       }
       // Remove old code entry
@@ -90,14 +112,9 @@ io.on('connection', (socket) => {
     codes.set(code, {
       trackedSocketId: socket.id,
       trackerSocketId: null,
-      lastCheckIn: null,
-      reminderTimeMinutes: null,
-      alertTimeMinutes: null,
-      reminderTimeEnd: null,
-      alertTimeEnd: null,
+      sessionToken: null,
       expiresAt: expiresAt,
-      isConnected: false,
-      settingsConfigured: false
+      isConnected: false
     });
     
     // Set expiration timer (only if not connected)
@@ -110,6 +127,43 @@ io.on('connection', (socket) => {
     socket.emit('codeRegistered', { code, expiresAt });
     console.log(`Code registered: ${code}, expires at ${new Date(expiresAt).toLocaleTimeString()}`);
   });
+  
+  // Handle reconnection with sessionToken
+  socket.on('reconnectSession', ({ sessionToken, role }) => {
+    if (!sessions.has(sessionToken)) {
+      socket.emit('error', 'Invalid session token');
+      return;
+    }
+    
+    const sessionData = sessions.get(sessionToken);
+    
+    // Update socket ID based on role
+    if (role === 'tracked') {
+      sessionData.trackedSocketId = socket.id;
+      socket.emit('sessionReconnected', { sessionToken, role: 'tracked' });
+    } else if (role === 'tracker') {
+      sessionData.trackerSocketId = socket.id;
+      socket.emit('sessionReconnected', { sessionToken, role: 'tracker' });
+      
+      // Send any pending alerts
+      if (pendingAlerts.has(sessionToken)) {
+        const alert = pendingAlerts.get(sessionToken);
+        socket.emit('checkInMissed', { sessionToken, timestamp: alert.timestamp });
+        pendingAlerts.delete(sessionToken);
+      }
+      
+      // Send current state
+      if (sessionData.lastCheckIn) {
+        socket.emit('checkInReceived', { sessionToken, timestamp: sessionData.lastCheckIn });
+      }
+    } else {
+      socket.emit('error', 'Invalid role');
+      return;
+    }
+    
+    sessions.set(sessionToken, sessionData);
+    console.log(`Session reconnected: ${sessionToken}, role: ${role}`);
+  });
 
   // Tracker connects with code
   socket.on('trackCode', (code) => {
@@ -120,12 +174,16 @@ io.on('connection', (socket) => {
     
     const codeData = codes.get(code);
     
-    // Check if code expired
+    // Check if code expired (only if not already connected)
     if (Date.now() > codeData.expiresAt && !codeData.isConnected) {
       socket.emit('error', 'Code has expired');
       expireCode(code);
       return;
     }
+    
+    // If tracker was previously connected with this socket, this is a reconnection
+    // Update the tracker socket ID to the new socket ID
+    const wasReconnecting = codeData.trackerSocketId && codeData.isConnected;
     
     // Mark as connected - code no longer expires
     codeData.isConnected = true;
@@ -137,94 +195,138 @@ io.on('connection', (socket) => {
       codeExpirationTimers.delete(code);
     }
     
-    codes.set(code, codeData);
-    socket.emit('trackingStarted', { code });
+    // Generate session token if this is a new connection (not a reconnection)
+    let sessionToken = codeData.sessionToken;
+    if (!sessionToken) {
+      sessionToken = generateSessionToken();
+      codeData.sessionToken = sessionToken;
+      
+      // Create session entry
+      sessions.set(sessionToken, {
+        trackedSocketId: codeData.trackedSocketId,
+        trackerSocketId: socket.id,
+        lastCheckIn: null,
+        reminderTimeMinutes: null,
+        alertTimeMinutes: null,
+        reminderTimeEnd: null,
+        alertTimeEnd: null,
+        settingsConfigured: false
+      });
+      
+      console.log(`Session token generated for code: ${code} -> ${sessionToken}`);
+    } else {
+      // Update existing session with new socket IDs
+      const sessionData = sessions.get(sessionToken);
+      if (sessionData) {
+        sessionData.trackedSocketId = codeData.trackedSocketId;
+        sessionData.trackerSocketId = socket.id;
+      }
+    }
     
-    // Notify tracked person
+    codes.set(code, codeData);
+    
+    // Always emit trackingStarted with sessionToken, even on reconnection
+    socket.emit('trackingStarted', { sessionToken });
+    
+    // Notify tracked person (always send trackerConnected with sessionToken)
     if (codeData.trackedSocketId) {
       const trackedSocket = io.sockets.sockets.get(codeData.trackedSocketId);
       if (trackedSocket) {
-        trackedSocket.emit('trackerConnected');
+        // Always emit trackerConnected with sessionToken so tracked person can update their UI
+        // Even on reconnection, they need to know the connection is active
+        trackedSocket.emit('trackerConnected', { sessionToken });
+        
+        // On reconnection, also send current state to tracker (not tracked person)
+        if (wasReconnecting) {
+          const sessionData = sessions.get(sessionToken);
+          if (sessionData && sessionData.lastCheckIn) {
+            socket.emit('checkInReceived', { sessionToken, timestamp: sessionData.lastCheckIn });
+          }
+        }
       }
     }
     
     // Send any pending alerts
-    if (pendingAlerts.has(code)) {
-      const alert = pendingAlerts.get(code);
-      socket.emit('checkInMissed', { code, timestamp: alert.timestamp });
-      pendingAlerts.delete(code);
+    if (pendingAlerts.has(sessionToken)) {
+      const alert = pendingAlerts.get(sessionToken);
+      socket.emit('checkInMissed', { sessionToken, timestamp: alert.timestamp });
+      pendingAlerts.delete(sessionToken);
     }
     
-    console.log(`Tracker connected for code: ${code} - connection established`);
+    if (wasReconnecting) {
+      console.log(`Tracker reconnected for code: ${code} - connection re-established`);
+    } else {
+      console.log(`Tracker connected for code: ${code} - connection established`);
+    }
   });
 
   // Tracked person checks in
-  socket.on('checkIn', (code) => {
-    if (!codes.has(code)) {
-      socket.emit('error', 'Invalid code');
+  socket.on('checkIn', (sessionToken) => {
+    if (!sessions.has(sessionToken)) {
+      socket.emit('error', 'Invalid session token');
       return;
     }
 
-    const codeData = codes.get(code);
-    if (codeData.trackedSocketId !== socket.id) {
+    const sessionData = sessions.get(sessionToken);
+    if (sessionData.trackedSocketId !== socket.id) {
       socket.emit('error', 'Not authorized');
       return;
     }
 
     const now = Date.now();
-    codeData.lastCheckIn = now;
+    sessionData.lastCheckIn = now;
     
     // Clear any existing timers
-    if (reminderTimers.has(code)) {
-      clearTimeout(reminderTimers.get(code));
-      reminderTimers.delete(code);
+    if (reminderTimers.has(sessionToken)) {
+      clearTimeout(reminderTimers.get(sessionToken));
+      reminderTimers.delete(sessionToken);
     }
-    if (alertTimers.has(code)) {
-      clearTimeout(alertTimers.get(code));
-      alertTimers.delete(code);
+    if (alertTimers.has(sessionToken)) {
+      clearTimeout(alertTimers.get(sessionToken));
+      alertTimers.delete(sessionToken);
     }
     
     // Restart timers if settings are configured
-    if (codeData.settingsConfigured && codeData.reminderTimeMinutes && codeData.alertTimeMinutes) {
-      const reminderMinutes = codeData.reminderTimeMinutes;
-      const alertMinutes = codeData.alertTimeMinutes;
+    if (sessionData.settingsConfigured && sessionData.reminderTimeMinutes && sessionData.alertTimeMinutes) {
+      const reminderMinutes = sessionData.reminderTimeMinutes;
+      const alertMinutes = sessionData.alertTimeMinutes;
       
       // Restart reminder timer
       const newReminderTimeEnd = now + (reminderMinutes * 60 * 1000);
       const reminderTimer = setTimeout(() => {
-        const currentCodeData = codes.get(code);
-        if (currentCodeData && currentCodeData.trackedSocketId) {
-          const trackedSocket = io.sockets.sockets.get(currentCodeData.trackedSocketId);
+        const currentSessionData = sessions.get(sessionToken);
+        if (currentSessionData && currentSessionData.trackedSocketId) {
+          const trackedSocket = io.sockets.sockets.get(currentSessionData.trackedSocketId);
           if (trackedSocket) {
-            trackedSocket.emit('reminderTimeReached', { code, timestamp: Date.now() });
+            trackedSocket.emit('reminderTimeReached', { sessionToken, timestamp: Date.now() });
           }
         }
-        reminderTimers.delete(code);
+        reminderTimers.delete(sessionToken);
       }, reminderMinutes * 60 * 1000);
-      reminderTimers.set(code, reminderTimer);
+      reminderTimers.set(sessionToken, reminderTimer);
       
       // Restart alert timer
       const newAlertTimeEnd = now + (alertMinutes * 60 * 1000);
       const alertTimer = setTimeout(() => {
-        const currentCodeData = codes.get(code);
-        if (currentCodeData && currentCodeData.trackerSocketId) {
-          const trackerSocket = io.sockets.sockets.get(currentCodeData.trackerSocketId);
+        const currentSessionData = sessions.get(sessionToken);
+        if (currentSessionData && currentSessionData.trackerSocketId) {
+          const trackerSocket = io.sockets.sockets.get(currentSessionData.trackerSocketId);
           if (trackerSocket) {
-            trackerSocket.emit('checkInMissed', { code, timestamp: Date.now() });
+            trackerSocket.emit('checkInMissed', { sessionToken, timestamp: Date.now() });
           }
         } else {
-          pendingAlerts.set(code, { timestamp: Date.now() });
+          pendingAlerts.set(sessionToken, { timestamp: Date.now() });
         }
-        alertTimers.delete(code);
+        alertTimers.delete(sessionToken);
       }, alertMinutes * 60 * 1000);
-      alertTimers.set(code, alertTimer);
+      alertTimers.set(sessionToken, alertTimer);
       
-      codeData.reminderTimeEnd = newReminderTimeEnd;
-      codeData.alertTimeEnd = newAlertTimeEnd;
+      sessionData.reminderTimeEnd = newReminderTimeEnd;
+      sessionData.alertTimeEnd = newAlertTimeEnd;
       
       // Notify client of new timer ends
-      if (codeData.trackedSocketId) {
-        const trackedSocket = io.sockets.sockets.get(codeData.trackedSocketId);
+      if (sessionData.trackedSocketId) {
+        const trackedSocket = io.sockets.sockets.get(sessionData.trackedSocketId);
         if (trackedSocket) {
           trackedSocket.emit('timersSet', { 
             reminderTimeMinutes: reminderMinutes, 
@@ -236,124 +338,152 @@ io.on('connection', (socket) => {
       }
     } else {
       // Reset timer end times if not configured
-      codeData.reminderTimeEnd = null;
-      codeData.alertTimeEnd = null;
+      sessionData.reminderTimeEnd = null;
+      sessionData.alertTimeEnd = null;
     }
     
     // Notify tracker if connected
-    if (codeData.trackerSocketId) {
-      const trackerSocket = io.sockets.sockets.get(codeData.trackerSocketId);
+    if (sessionData.trackerSocketId) {
+      const trackerSocket = io.sockets.sockets.get(sessionData.trackerSocketId);
       if (trackerSocket) {
-        trackerSocket.emit('checkInReceived', { code, timestamp: now });
+        trackerSocket.emit('checkInReceived', { sessionToken, timestamp: now });
       }
     }
     
-    codes.set(code, codeData);
+    sessions.set(sessionToken, sessionData);
     socket.emit('checkInConfirmed', { timestamp: now });
-    console.log(`Check-in received for code: ${code}`);
+    console.log(`Check-in received for session: ${sessionToken}`);
   });
 
   // Tracked person sets reminder and alert times
-  socket.on('setTimers', ({ code, reminderTimeMinutes, alertTimeMinutes }) => {
-    if (!codes.has(code)) {
-      socket.emit('error', 'Invalid code');
+  socket.on('setTimers', ({ sessionToken, reminderTimeMinutes, alertTimeMinutes }) => {
+    if (!sessions.has(sessionToken)) {
+      socket.emit('error', 'Invalid session token');
       return;
     }
 
-    const codeData = codes.get(code);
-    if (codeData.trackedSocketId !== socket.id) {
+    const sessionData = sessions.get(sessionToken);
+    if (sessionData.trackedSocketId !== socket.id) {
       socket.emit('error', 'Not authorized');
       return;
     }
 
     // Clear existing timers
-    if (reminderTimers.has(code)) {
-      clearTimeout(reminderTimers.get(code));
-      reminderTimers.delete(code);
+    if (reminderTimers.has(sessionToken)) {
+      clearTimeout(reminderTimers.get(sessionToken));
+      reminderTimers.delete(sessionToken);
     }
-    if (alertTimers.has(code)) {
-      clearTimeout(alertTimers.get(code));
-      alertTimers.delete(code);
+    if (alertTimers.has(sessionToken)) {
+      clearTimeout(alertTimers.get(sessionToken));
+      alertTimers.delete(sessionToken);
     }
 
     const now = Date.now();
-    const lastCheckIn = codeData.lastCheckIn || now;
+    const lastCheckIn = sessionData.lastCheckIn || now;
     
     // Set reminder timer (for tracked person)
     const reminderTimeEnd = lastCheckIn + (reminderTimeMinutes * 60 * 1000);
     const reminderTimer = setTimeout(() => {
-      const currentCodeData = codes.get(code);
-      if (currentCodeData && currentCodeData.trackedSocketId) {
-        const trackedSocket = io.sockets.sockets.get(currentCodeData.trackedSocketId);
+      const currentSessionData = sessions.get(sessionToken);
+      if (currentSessionData && currentSessionData.trackedSocketId) {
+        const trackedSocket = io.sockets.sockets.get(currentSessionData.trackedSocketId);
         if (trackedSocket) {
-          trackedSocket.emit('reminderTimeReached', { code, timestamp: Date.now() });
+          trackedSocket.emit('reminderTimeReached', { sessionToken, timestamp: Date.now() });
         }
       }
-      reminderTimers.delete(code);
-      console.log(`Reminder timer expired for code: ${code}`);
+      reminderTimers.delete(sessionToken);
+      console.log(`Reminder timer expired for session: ${sessionToken}`);
     }, reminderTimeEnd - now);
     
-    reminderTimers.set(code, reminderTimer);
+    reminderTimers.set(sessionToken, reminderTimer);
 
     // Set alert timer (for tracker)
     const alertTimeEnd = lastCheckIn + (alertTimeMinutes * 60 * 1000);
     const alertTimer = setTimeout(() => {
-      const currentCodeData = codes.get(code);
-      if (currentCodeData && currentCodeData.trackerSocketId) {
-        const trackerSocket = io.sockets.sockets.get(currentCodeData.trackerSocketId);
+      const currentSessionData = sessions.get(sessionToken);
+      if (currentSessionData && currentSessionData.trackerSocketId) {
+        const trackerSocket = io.sockets.sockets.get(currentSessionData.trackerSocketId);
         if (trackerSocket) {
-          trackerSocket.emit('checkInMissed', { code, timestamp: Date.now() });
+          trackerSocket.emit('checkInMissed', { sessionToken, timestamp: Date.now() });
         }
       } else {
         // Store alert for when tracker connects
-        pendingAlerts.set(code, { timestamp: Date.now() });
+        pendingAlerts.set(sessionToken, { timestamp: Date.now() });
       }
-      alertTimers.delete(code);
-      console.log(`Alert timer expired for code: ${code}`);
+      alertTimers.delete(sessionToken);
+      console.log(`Alert timer expired for session: ${sessionToken}`);
     }, alertTimeEnd - now);
     
-    alertTimers.set(code, alertTimer);
+    alertTimers.set(sessionToken, alertTimer);
 
-    codeData.reminderTimeMinutes = reminderTimeMinutes;
-    codeData.alertTimeMinutes = alertTimeMinutes;
-    codeData.reminderTimeEnd = reminderTimeEnd;
-    codeData.alertTimeEnd = alertTimeEnd;
-    codeData.settingsConfigured = true;
-    codes.set(code, codeData);
+    sessionData.reminderTimeMinutes = reminderTimeMinutes;
+    sessionData.alertTimeMinutes = alertTimeMinutes;
+    sessionData.reminderTimeEnd = reminderTimeEnd;
+    sessionData.alertTimeEnd = alertTimeEnd;
+    sessionData.settingsConfigured = true;
+    sessions.set(sessionToken, sessionData);
     
     socket.emit('timersSet', { reminderTimeMinutes, alertTimeMinutes, reminderTimeEnd, alertTimeEnd });
-    console.log(`Timers set for code: ${code}, reminder: ${reminderTimeMinutes}min, alert: ${alertTimeMinutes}min`);
+    console.log(`Timers set for session: ${sessionToken}, reminder: ${reminderTimeMinutes}min, alert: ${alertTimeMinutes}min`);
   });
 
   // Handle disconnection
-  socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
+  socket.on('disconnect', (reason) => {
+    console.log('Client disconnected:', socket.id, 'Reason:', reason);
     
-    // Update connection state
+    // Update connection state in sessions
+    for (const [sessionToken, sessionData] of sessions.entries()) {
+      if (sessionData.trackedSocketId === socket.id) {
+        // Tracked person disconnected
+        sessionData.trackedSocketId = null;
+        // If tracker is still connected, notify them
+        if (sessionData.trackerSocketId) {
+          const trackerSocket = io.sockets.sockets.get(sessionData.trackerSocketId);
+          if (trackerSocket) {
+            trackerSocket.emit('trackedPersonDisconnected');
+          }
+        }
+        sessions.set(sessionToken, sessionData);
+        break;
+      } else if (sessionData.trackerSocketId === socket.id) {
+        // Tracker disconnected
+        sessionData.trackerSocketId = null;
+        // If tracked person is still connected, notify them
+        if (sessionData.trackedSocketId) {
+          const trackedSocket = io.sockets.sockets.get(sessionData.trackedSocketId);
+          if (trackedSocket) {
+            // Only notify if this looks like a permanent disconnection
+            // (not a normal reconnection scenario)
+            if (reason === 'io server disconnect' || reason === 'transport close') {
+              trackedSocket.emit('trackerDisconnected');
+            }
+          }
+        }
+        sessions.set(sessionToken, sessionData);
+        break;
+      }
+    }
+    
+    // Also update code mappings for code expiration logic
     for (const [code, codeData] of codes.entries()) {
       if (codeData.trackedSocketId === socket.id) {
         // Tracked person disconnected
         codeData.trackedSocketId = null;
-        // If tracker is still connected, notify them
+        // If tracker is still connected, keep code active
         if (codeData.trackerSocketId) {
-          const trackerSocket = io.sockets.sockets.get(codeData.trackerSocketId);
-          if (trackerSocket) {
-            trackerSocket.emit('trackedPersonDisconnected');
-          }
-          // Don't mark as disconnected yet - tracker might reconnect
+          // Keep isConnected = true so code doesn't expire
+        } else {
+          // Both disconnected - allow code to expire
+          codeData.isConnected = false;
         }
         codes.set(code, codeData);
         break;
       } else if (codeData.trackerSocketId === socket.id) {
         // Tracker disconnected
         codeData.trackerSocketId = null;
-        codeData.isConnected = false; // Allow code to expire again if tracked person is also disconnected
-        // If tracked person is still connected, notify them
-        if (codeData.trackedSocketId) {
-          const trackedSocket = io.sockets.sockets.get(codeData.trackedSocketId);
-          if (trackedSocket) {
-            trackedSocket.emit('trackerDisconnected');
-          }
+        // Only mark as disconnected if both are disconnected
+        if (!codeData.trackedSocketId) {
+          codeData.isConnected = false; // Both disconnected, allow code to expire
         }
         codes.set(code, codeData);
         break;

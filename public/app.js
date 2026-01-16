@@ -2,9 +2,11 @@
 let socket = null;
 let currentRole = null;
 let connectionCode = null;
+let sessionToken = null; // Secure session token after pairing
 let timerInterval = null;
 let codeExpirationInterval = null;
 let codeExpirationDisplayInterval = null;
+let keepAliveInterval = null; // Keep-alive interval
 let reminderTimeMinutes = 30; // Default 30 minutes
 let alertTimeMinutes = 60; // Default 60 minutes
 let reminderTimeEnd = null;
@@ -102,34 +104,88 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function connectSocket() {
+    // If socket exists and is connected, we can reuse it
+    // But we need to ensure event listeners are set up
     if (socket && socket.connected) {
-        return; // Already connected
+        // Re-establish connection state if needed
+        if (sessionToken) {
+            // If we have a sessionToken, use it to reconnect
+            socket.emit('reconnectSession', { sessionToken, role: currentRole });
+        } else if (currentRole === 'tracked' && connectionCode) {
+            socket.emit('registerCode', connectionCode);
+        } else if (currentRole === 'tracker' && connectionCode) {
+            socket.emit('trackCode', connectionCode);
+        }
+        return;
     }
     
     // Use server URL from config.js
     const serverUrl = window.SERVER_URL || 'http://localhost:3000';
-    socket = io(serverUrl);
+    // Enable auto-reconnect with aggressive settings for persistent connection
+    socket = io(serverUrl, {
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000,
+        reconnectionAttempts: Infinity,
+        timeout: 20000,
+        transports: ['websocket', 'polling']
+    });
 
     socket.on('connect', () => {
-        console.log('Connected to server');
-        if (currentRole === 'tracked' && connectionCode && !isConnected) {
-            // Re-register code after connection
+        console.log('Connected to server, socket ID:', socket.id);
+        // Always re-establish connection state when socket connects (including reconnects)
+        if (sessionToken) {
+            // If we have a sessionToken, use it to reconnect
+            socket.emit('reconnectSession', { sessionToken, role: currentRole });
+        } else if (currentRole === 'tracked' && connectionCode) {
+            // Re-register code after connection/reconnection
             socket.emit('registerCode', connectionCode);
-        } else if (currentRole === 'tracker' && connectionCode && !isConnected) {
-            // Reconnect as tracker
+        } else if (currentRole === 'tracker' && connectionCode) {
+            // Always re-establish tracker connection on reconnect
             socket.emit('trackCode', connectionCode);
         }
     });
 
-    socket.on('disconnect', () => {
-        console.log('Disconnected from server');
+    socket.on('reconnect', (attemptNumber) => {
+        console.log('Reconnected after', attemptNumber, 'attempts');
+        // Re-establish connection state after reconnection
+        if (sessionToken) {
+            // If we have a sessionToken, use it to reconnect
+            socket.emit('reconnectSession', { sessionToken, role: currentRole });
+        } else if (currentRole === 'tracked' && connectionCode) {
+            socket.emit('registerCode', connectionCode);
+        } else if (currentRole === 'tracker' && connectionCode) {
+            socket.emit('trackCode', connectionCode);
+        }
+    });
+
+    socket.on('disconnect', (reason) => {
+        console.log('Disconnected from server:', reason);
         if (isConnected) {
             showStatus('Connection lost. Reconnecting...', 'error');
+            // Update UI but keep trying to reconnect
+            if (currentRole === 'tracker') {
+                trackerConnectionStatus.textContent = 'Reconnecting...';
+                trackerConnectionStatus.style.color = '#ffc107';
+            }
+        }
+    });
+
+    socket.on('reconnect_attempt', (attemptNumber) => {
+        console.log('Reconnection attempt', attemptNumber);
+        if (currentRole === 'tracker') {
+            trackerConnectionStatus.textContent = `Reconnecting... (${attemptNumber})`;
+            trackerConnectionStatus.style.color = '#ffc107';
         }
     });
 
     socket.on('codeRegistered', (data) => {
         codeExpiresAt = data.expiresAt;
+        // If we have a sessionToken from reconnection, store it
+        if (data.sessionToken) {
+            sessionToken = data.sessionToken;
+            saveState();
+        }
         // Start code expiration display and refresh timer if not connected
         if (!isConnected) {
             startCodeExpirationDisplay();
@@ -138,9 +194,26 @@ function connectSocket() {
             stopCodeExpirationDisplay();
         }
     });
+    
+    socket.on('sessionReconnected', (data) => {
+        sessionToken = data.sessionToken;
+        saveState();
+        console.log('Session reconnected:', sessionToken);
+    });
 
-    socket.on('trackerConnected', () => {
+    socket.on('trackerConnected', (data) => {
         isConnected = true;
+        // Safely extract sessionToken from data
+        if (data && data.sessionToken) {
+            sessionToken = data.sessionToken;
+            saveState(); // Save connection state
+        } else {
+            console.warn('trackerConnected event received without sessionToken');
+            // Try to get sessionToken from sessionReconnected if available
+            if (!sessionToken) {
+                console.warn('No sessionToken available, connection may not persist properly');
+            }
+        }
         connectionStatus.textContent = 'Tracker connected';
         connectionStatus.style.color = '#28a745';
         // Stop code refresh and expiration display - connection is established
@@ -151,6 +224,9 @@ function connectSocket() {
             codeExpirationDisplay.style.color = '#28a745';
         }
         
+        // Start keep-alive mechanism
+        startKeepAlive();
+        
         // Show settings screen if not configured
         if (!settingsConfigured) {
             showStatus('Tracker connected! Please configure your alert times.', 'success');
@@ -160,10 +236,13 @@ function connectSocket() {
         } else {
             showStatus('Tracker connected!', 'success');
         }
+        console.log('Tracker connected - connection established, sessionToken:', sessionToken);
     });
 
     socket.on('trackerDisconnected', () => {
         isConnected = false;
+        saveState(); // Save disconnected state
+        stopKeepAlive(); // Stop keep-alive when disconnected
         connectionStatus.textContent = 'Tracker disconnected';
         connectionStatus.style.color = '#dc3545';
         showStatus('Tracker disconnected', 'error');
@@ -179,10 +258,22 @@ function connectSocket() {
 
     socket.on('trackingStarted', (data) => {
         isConnected = true;
+        // Safely extract sessionToken from data
+        if (data && data.sessionToken) {
+            sessionToken = data.sessionToken;
+            saveState(); // Save connection state
+        } else {
+            console.error('trackingStarted event received without sessionToken');
+            showStatus('Connection error: Missing session token', 'error');
+            return;
+        }
         showScreen('trackerInterface');
         showStatus('Connected successfully!', 'success');
         trackerConnectionStatus.textContent = 'Connected';
         trackerConnectionStatus.style.color = '#28a745';
+        console.log('Tracker connection established, sessionToken:', sessionToken);
+        // Start keep-alive mechanism
+        startKeepAlive();
     });
 
     socket.on('checkInConfirmed', (data) => {
@@ -227,6 +318,8 @@ function connectSocket() {
         trackerConnectionStatus.style.color = '#dc3545';
         showStatus('Tracked person disconnected', 'error');
         isConnected = false;
+        saveState(); // Save disconnected state
+        stopKeepAlive(); // Stop keep-alive when disconnected
     });
 
     socket.on('error', (message) => {
@@ -291,9 +384,43 @@ function stopCodeRefreshTimer() {
     }
 }
 
+function startKeepAlive() {
+    stopKeepAlive(); // Clear any existing keep-alive
+    
+    // Send periodic ping to keep connection alive and verify it's still working
+    // Socket.IO has built-in ping/pong, but this adds application-level verification
+    keepAliveInterval = setInterval(() => {
+        if (socket && socket.connected && connectionCode) {
+            // Send a lightweight ping to server
+            // We can use a custom event or just check if socket is still connected
+            if (currentRole === 'tracked') {
+                // Just verify socket is still connected - no need to re-register unless disconnected
+                if (!socket.connected) {
+                    console.warn('Socket disconnected, attempting to reconnect...');
+                    connectSocket();
+                }
+            } else if (currentRole === 'tracker') {
+                // For tracker, ensure we're still tracking the code
+                if (!socket.connected) {
+                    console.warn('Tracker socket disconnected, attempting to reconnect...');
+                    connectSocket();
+                }
+            }
+        }
+    }, 30000); // Check every 30 seconds
+}
+
+function stopKeepAlive() {
+    if (keepAliveInterval) {
+        clearInterval(keepAliveInterval);
+        keepAliveInterval = null;
+    }
+}
+
 function loadSavedState() {
     const savedRole = localStorage.getItem('allIsWell_role');
     const savedCode = localStorage.getItem('allIsWell_code');
+    const savedSessionToken = localStorage.getItem('allIsWell_sessionToken');
     const savedReminderTime = localStorage.getItem('allIsWell_reminderTime');
     const savedAlertTime = localStorage.getItem('allIsWell_alertTime');
     const savedReminderTimeEnd = localStorage.getItem('allIsWell_reminderTimeEnd');
@@ -306,6 +433,9 @@ function loadSavedState() {
     }
     if (savedCode) {
         connectionCode = savedCode;
+    }
+    if (savedSessionToken) {
+        sessionToken = savedSessionToken;
     }
     if (savedReminderTime) {
         reminderTimeMinutes = parseInt(savedReminderTime);
@@ -335,7 +465,28 @@ function loadSavedState() {
             if (reminderTimeEnd || alertTimeEnd) {
                 startLocalTimers();
             }
+        } else if (currentRole === 'tracker') {
+            // If tracker was connected, show tracker interface and reconnect
+            showScreen('trackerInterface');
+            trackerConnectionStatus.textContent = 'Reconnecting...';
+            trackerConnectionStatus.style.color = '#ffc107';
         }
+    }
+    
+    // If we have a role and code, attempt to reconnect automatically
+    if (currentRole && connectionCode) {
+        // Delay slightly to ensure DOM is ready
+        setTimeout(() => {
+            connectSocket();
+            // If we have a sessionToken, try to reconnect with it
+            if (sessionToken) {
+                setTimeout(() => {
+                    if (socket && socket.connected) {
+                        socket.emit('reconnectSession', { sessionToken, role: currentRole });
+                    }
+                }, 1000);
+            }
+        }, 500);
     }
 }
 
@@ -345,6 +496,9 @@ function saveState() {
     }
     if (connectionCode) {
         localStorage.setItem('allIsWell_code', connectionCode);
+    }
+    if (sessionToken) {
+        localStorage.setItem('allIsWell_sessionToken', sessionToken);
     }
     if (reminderTimeMinutes) {
         localStorage.setItem('allIsWell_reminderTime', reminderTimeMinutes.toString());
@@ -415,18 +569,42 @@ function connectAsTracker() {
     // Connect socket if not connected
     connectSocket();
     
-    // Wait for connection, then send track code
-    if (socket.connected) {
-        socket.emit('trackCode', code);
-    } else {
-        socket.once('connect', () => {
+    // Ensure we have a socket before emitting
+    const emitTrackCode = () => {
+        if (socket && socket.connected) {
+            console.log('Emitting trackCode for:', code);
             socket.emit('trackCode', code);
-        });
+        } else {
+            // Wait for connection, then emit
+            if (socket) {
+                socket.once('connect', () => {
+                    console.log('Socket connected, emitting trackCode for:', code);
+                    socket.emit('trackCode', code);
+                });
+            }
+        }
+    };
+    
+    // If already connected, emit immediately
+    if (socket && socket.connected) {
+        emitTrackCode();
+    } else if (socket) {
+        // Wait for connection
+        socket.once('connect', emitTrackCode);
+    } else {
+        // Socket not created yet, connectSocket will create it
+        setTimeout(() => {
+            if (socket) {
+                socket.once('connect', emitTrackCode);
+            } else {
+                showStatus('Failed to connect to server', 'error');
+            }
+        }, 100);
     }
 }
 
 function handleCheckIn() {
-    if (!connectionCode || !socket || !socket.connected) {
+    if (!sessionToken || !socket || !socket.connected) {
         showStatus('Not connected. Please check your connection.', 'error');
         return;
     }
@@ -434,7 +612,7 @@ function handleCheckIn() {
     checkInBtn.disabled = true;
     checkInBtn.querySelector('.btn-text').textContent = 'Checking in...';
     
-    socket.emit('checkIn', connectionCode);
+    socket.emit('checkIn', sessionToken);
     
     setTimeout(() => {
         checkInBtn.disabled = false;
@@ -471,9 +649,9 @@ function handleSettingsSubmit(e) {
     saveState();
     
     // Set timers on server
-    if (socket && socket.connected && connectionCode) {
+    if (socket && socket.connected && sessionToken) {
         socket.emit('setTimers', { 
-            code: connectionCode, 
+            sessionToken: sessionToken, 
             reminderTimeMinutes: reminderTime,
             alertTimeMinutes: alertTime
         });
@@ -485,10 +663,10 @@ function handleSettingsSubmit(e) {
 
 function startTimers() {
     // Set timers on server
-    if (!connectionCode || !socket || !socket.connected || !settingsConfigured) return;
+    if (!sessionToken || !socket || !socket.connected || !settingsConfigured) return;
     
     socket.emit('setTimers', { 
-        code: connectionCode, 
+        sessionToken: sessionToken, 
         reminderTimeMinutes: reminderTimeMinutes,
         alertTimeMinutes: alertTimeMinutes
     });

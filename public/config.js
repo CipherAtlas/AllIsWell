@@ -17,7 +17,7 @@ const getServerUrl = () => {
   // Replace this with your actual Railway server URL after deployment
   // Railway URL format: https://your-app-name.up.railway.app
   // You'll get this URL after deploying to Railway
-  return 'https://web-production-e764d.up.railway.app/';
+  return 'https://web-production-e764d.up.railway.app';
 };
 
 // Make server URL available globally
