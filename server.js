@@ -25,8 +25,19 @@ const io = socketIo(server, {
 // Parse JSON bodies for REST API
 app.use(express.json());
 
-// Serve static files from public directory
-app.use(express.static(path.join(__dirname, 'public')));
+// Backend API only - no static file serving
+// Frontend is separate (Android app or deployed separately)
+// Root route - return API info
+app.get('/', (req, res) => {
+  res.json({
+    message: 'All Is Well Backend API',
+    version: '1.0.0',
+    endpoints: {
+      websocket: 'Socket.IO WebSocket connection',
+      api: '/api/status/:sessionToken'
+    }
+  });
+});
 
 // Initialize Redis client (if available)
 // Railway provides REDIS_URL environment variable
