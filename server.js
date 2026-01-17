@@ -4,6 +4,15 @@ const socketIo = require('socket.io');
 const path = require('path');
 const crypto = require('crypto');
 
+// Optional Redis support - gracefully degrade if not available
+let redis = null;
+let redisClient = null;
+try {
+  redis = require('redis');
+} catch (error) {
+  console.warn('Redis module not found, continuing without persistence');
+}
+
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
@@ -13,8 +22,158 @@ const io = socketIo(server, {
   }
 });
 
+// Parse JSON bodies for REST API
+app.use(express.json());
+
 // Serve static files from public directory
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Initialize Redis client (if available)
+// Railway provides REDIS_URL environment variable
+if (redis) {
+  redisClient = redis.createClient({
+    url: process.env.REDIS_URL || 'redis://localhost:6379'
+  });
+
+  redisClient.on('error', (err) => {
+    console.error('Redis Client Error:', err);
+    // Continue without Redis if connection fails (graceful degradation)
+  });
+
+  redisClient.on('connect', () => {
+    console.log('Redis Client Connected');
+  });
+
+  // Connect to Redis (with error handling)
+  (async () => {
+    try {
+      await redisClient.connect();
+      console.log('Redis connected successfully');
+      // Load all sessions from Redis on startup
+      await loadAllSessionsFromRedis();
+    } catch (error) {
+      console.warn('Redis connection failed, continuing without persistence:', error.message);
+      // Server will continue to work, just without persistence
+    }
+  })();
+} else {
+  console.log('Running without Redis persistence (in-memory only)');
+}
+
+// Session persistence helpers
+async function saveSessionToRedis(sessionToken, sessionData) {
+  if (!redisClient) return;
+  try {
+    if (redisClient.isOpen) {
+      // Save session with 30 day expiration
+      await redisClient.setEx(
+        `session:${sessionToken}`,
+        30 * 24 * 60 * 60, // 30 days in seconds
+        JSON.stringify(sessionData)
+      );
+    }
+  } catch (error) {
+    console.error('Error saving session to Redis:', error);
+  }
+}
+
+async function loadSessionFromRedis(sessionToken) {
+  if (!redisClient) return null;
+  try {
+    if (redisClient.isOpen) {
+      const data = await redisClient.get(`session:${sessionToken}`);
+      if (data) {
+        return JSON.parse(data);
+      }
+    }
+  } catch (error) {
+    console.error('Error loading session from Redis:', error);
+  }
+  return null;
+}
+
+async function deleteSessionFromRedis(sessionToken) {
+  if (!redisClient) return;
+  try {
+    if (redisClient.isOpen) {
+      await redisClient.del(`session:${sessionToken}`);
+    }
+  } catch (error) {
+    console.error('Error deleting session from Redis:', error);
+  }
+}
+
+// Load all sessions from Redis on startup
+async function loadAllSessionsFromRedis() {
+  if (!redisClient) return;
+  try {
+    if (redisClient.isOpen) {
+      const keys = await redisClient.keys('session:*');
+      console.log(`Loading ${keys.length} sessions from Redis...`);
+      
+      for (const key of keys) {
+        const sessionToken = key.replace('session:', '');
+        const sessionData = await loadSessionFromRedis(sessionToken);
+        if (sessionData) {
+          // Clear socket IDs (they'll be updated on reconnection)
+          sessionData.trackedSocketId = null;
+          if (sessionData.trackerSocketIds) {
+            sessionData.trackerSocketIds = [];
+          }
+          sessions.set(sessionToken, sessionData);
+        }
+      }
+      console.log(`Loaded ${sessions.size} sessions into memory`);
+    }
+  } catch (error) {
+    console.error('Error loading sessions from Redis:', error);
+  }
+}
+
+// REST API endpoint for background service status checks
+app.get('/api/status/:sessionToken', async (req, res) => {
+  const { sessionToken } = req.params;
+  
+  // Check memory first, then Redis
+  let sessionData = sessions.get(sessionToken);
+  
+  if (!sessionData) {
+    // Try loading from Redis
+    sessionData = await loadSessionFromRedis(sessionToken);
+    if (sessionData) {
+      // Restore to memory
+      sessions.set(sessionToken, sessionData);
+    }
+  }
+  
+  if (!sessionData) {
+    return res.status(404).json({ error: 'Invalid session token' });
+  }
+  
+  // Use sessionData (already loaded above)
+  const now = Date.now();
+  
+  // Calculate if alert expired
+  let alertExpired = false;
+  if (sessionData.lastCheckIn && sessionData.alertTimeMinutes && sessionData.settingsConfigured) {
+    const alertTimeMs = sessionData.alertTimeMinutes * 60 * 1000;
+    const timeSinceCheckIn = now - sessionData.lastCheckIn;
+    if (timeSinceCheckIn > alertTimeMs) {
+      alertExpired = true;
+      // Mark as pending alert if not already
+      if (!pendingAlerts.has(sessionToken)) {
+        pendingAlerts.set(sessionToken, { timestamp: now });
+      }
+    }
+  }
+  
+  res.json({
+    sessionToken,
+    lastCheckIn: sessionData.lastCheckIn,
+    alertExpired: alertExpired,
+    settingsConfigured: sessionData.settingsConfigured
+  });
+});
 
 // Store code mappings: code -> { trackedSocketId: string | null, trackerSocketId: string | null, sessionToken: string | null, expiresAt: timestamp, isConnected: boolean }
 const codes = new Map();
@@ -129,13 +288,24 @@ io.on('connection', (socket) => {
   });
   
   // Handle reconnection with sessionToken
-  socket.on('reconnectSession', ({ sessionToken, role }) => {
-    if (!sessions.has(sessionToken)) {
+  socket.on('reconnectSession', async ({ sessionToken, role }) => {
+    // Check memory first, then Redis
+    let sessionData = sessions.get(sessionToken);
+    
+    if (!sessionData) {
+      // Try loading from Redis
+      sessionData = await loadSessionFromRedis(sessionToken);
+      if (sessionData) {
+        // Restore to memory
+        sessions.set(sessionToken, sessionData);
+        console.log(`Session restored from Redis: ${sessionToken}`);
+      }
+    }
+    
+    if (!sessionData) {
       socket.emit('error', 'Invalid session token');
       return;
     }
-    
-    const sessionData = sessions.get(sessionToken);
     
     // Update socket ID based on role
     if (role === 'tracked') {
@@ -169,11 +339,55 @@ io.on('connection', (socket) => {
     }
     
     sessions.set(sessionToken, sessionData);
+    // Save to Redis after update
+    await saveSessionToRedis(sessionToken, sessionData);
     console.log(`Session reconnected: ${sessionToken}, role: ${role}`);
+  });
+  
+  // Get status update (for tracker polling)
+  socket.on('getStatus', async ({ sessionToken }) => {
+    // Check memory first, then Redis
+    let sessionData = sessions.get(sessionToken);
+    
+    if (!sessionData) {
+      // Try loading from Redis
+      sessionData = await loadSessionFromRedis(sessionToken);
+      if (sessionData) {
+        // Restore to memory
+        sessions.set(sessionToken, sessionData);
+      }
+    }
+    
+    if (!sessionData) {
+      socket.emit('error', 'Invalid session token');
+      return;
+    }
+    const now = Date.now();
+    
+    // Calculate if alert expired
+    let alertExpired = false;
+    if (sessionData.lastCheckIn && sessionData.alertTimeMinutes && sessionData.settingsConfigured) {
+      const alertTimeMs = sessionData.alertTimeMinutes * 60 * 1000;
+      const timeSinceCheckIn = now - sessionData.lastCheckIn;
+      if (timeSinceCheckIn > alertTimeMs) {
+        alertExpired = true;
+        // Mark as pending alert if not already
+        if (!pendingAlerts.has(sessionToken)) {
+          pendingAlerts.set(sessionToken, { timestamp: now });
+        }
+      }
+    }
+    
+    // Send status update
+    socket.emit('statusUpdate', {
+      sessionToken,
+      lastCheckIn: sessionData.lastCheckIn,
+      alertExpired: alertExpired
+    });
   });
 
   // Tracker connects with code
-  socket.on('trackCode', (code) => {
+  socket.on('trackCode', async (code) => {
     if (!codes.has(code)) {
       socket.emit('error', 'Invalid or expired code');
       return;
@@ -209,7 +423,7 @@ io.on('connection', (socket) => {
       codeData.sessionToken = sessionToken;
       
       // Create session entry
-      sessions.set(sessionToken, {
+      const newSessionData = {
         trackedSocketId: codeData.trackedSocketId,
         trackerSocketIds: [socket.id], // Array to support multiple trackers
         lastCheckIn: null,
@@ -218,7 +432,10 @@ io.on('connection', (socket) => {
         reminderTimeEnd: null,
         alertTimeEnd: null,
         settingsConfigured: false
-      });
+      };
+      sessions.set(sessionToken, newSessionData);
+      // Save to Redis
+      await saveSessionToRedis(sessionToken, newSessionData);
       
       console.log(`Session token generated for code: ${code} -> ${sessionToken}`);
     } else {
@@ -235,6 +452,8 @@ io.on('connection', (socket) => {
           sessionData.trackerSocketIds.push(socket.id);
           console.log(`New tracker added to session ${sessionToken}, total trackers: ${sessionData.trackerSocketIds.length}`);
         }
+        // Save to Redis after update
+        await saveSessionToRedis(sessionToken, sessionData);
       }
     }
     
@@ -273,179 +492,83 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Tracked person checks in
-  socket.on('checkIn', (sessionToken) => {
-    if (!sessions.has(sessionToken)) {
+  // Tracked person checks in (on-demand mode)
+  socket.on('checkIn', async (sessionToken) => {
+    // Check memory first, then Redis
+    let sessionData = sessions.get(sessionToken);
+    
+    if (!sessionData) {
+      // Try loading from Redis
+      sessionData = await loadSessionFromRedis(sessionToken);
+      if (sessionData) {
+        // Restore to memory
+        sessions.set(sessionToken, sessionData);
+      }
+    }
+    
+    if (!sessionData) {
       socket.emit('error', 'Invalid session token');
       return;
     }
-
-    const sessionData = sessions.get(sessionToken);
-    if (sessionData.trackedSocketId !== socket.id) {
-      socket.emit('error', 'Not authorized');
-      return;
-    }
-
+    // In on-demand mode, we're more lenient - just verify sessionToken matches
+    // (socket.id may change with each connection)
+    
     const now = Date.now();
     sessionData.lastCheckIn = now;
     
-    // Clear any existing timers
-    if (reminderTimers.has(sessionToken)) {
-      clearTimeout(reminderTimers.get(sessionToken));
-      reminderTimers.delete(sessionToken);
-    }
-    if (alertTimers.has(sessionToken)) {
-      clearTimeout(alertTimers.get(sessionToken));
-      alertTimers.delete(sessionToken);
-    }
+    // Clear pending alerts since check-in happened
+    pendingAlerts.delete(sessionToken);
     
-    // Restart timers if settings are configured
+    // Calculate timer end times if settings are configured (client will calculate too)
     if (sessionData.settingsConfigured && sessionData.reminderTimeMinutes && sessionData.alertTimeMinutes) {
       const reminderMinutes = sessionData.reminderTimeMinutes;
       const alertMinutes = sessionData.alertTimeMinutes;
       
-      // Restart reminder timer
-      const newReminderTimeEnd = now + (reminderMinutes * 60 * 1000);
-      const reminderTimer = setTimeout(() => {
-        const currentSessionData = sessions.get(sessionToken);
-        if (currentSessionData && currentSessionData.trackedSocketId) {
-          const trackedSocket = io.sockets.sockets.get(currentSessionData.trackedSocketId);
-          if (trackedSocket) {
-            trackedSocket.emit('reminderTimeReached', { sessionToken, timestamp: Date.now() });
-          }
-        }
-        reminderTimers.delete(sessionToken);
-      }, reminderMinutes * 60 * 1000);
-      reminderTimers.set(sessionToken, reminderTimer);
-      
-      // Restart alert timer
-      const newAlertTimeEnd = now + (alertMinutes * 60 * 1000);
-      const alertTimer = setTimeout(() => {
-        const currentSessionData = sessions.get(sessionToken);
-        if (currentSessionData && currentSessionData.trackerSocketIds && currentSessionData.trackerSocketIds.length > 0) {
-          // Notify ALL trackers
-          let notifiedAny = false;
-          currentSessionData.trackerSocketIds.forEach(trackerSocketId => {
-            const trackerSocket = io.sockets.sockets.get(trackerSocketId);
-            if (trackerSocket) {
-              trackerSocket.emit('checkInMissed', { sessionToken, timestamp: Date.now() });
-              notifiedAny = true;
-            }
-          });
-          if (!notifiedAny) {
-            pendingAlerts.set(sessionToken, { timestamp: Date.now() });
-          }
-        } else {
-          pendingAlerts.set(sessionToken, { timestamp: Date.now() });
-        }
-        alertTimers.delete(sessionToken);
-      }, alertMinutes * 60 * 1000);
-      alertTimers.set(sessionToken, alertTimer);
-      
-      sessionData.reminderTimeEnd = newReminderTimeEnd;
-      sessionData.alertTimeEnd = newAlertTimeEnd;
+      sessionData.reminderTimeEnd = now + (reminderMinutes * 60 * 1000);
+      sessionData.alertTimeEnd = now + (alertMinutes * 60 * 1000);
       
       // Notify client of new timer ends
-      if (sessionData.trackedSocketId) {
-        const trackedSocket = io.sockets.sockets.get(sessionData.trackedSocketId);
-        if (trackedSocket) {
-          trackedSocket.emit('timersSet', { 
-            reminderTimeMinutes: reminderMinutes, 
-            alertTimeMinutes: alertMinutes, 
-            reminderTimeEnd: newReminderTimeEnd, 
-            alertTimeEnd: newAlertTimeEnd 
-          });
-        }
-      }
-    } else {
-      // Reset timer end times if not configured
-      sessionData.reminderTimeEnd = null;
-      sessionData.alertTimeEnd = null;
-    }
-    
-    // Notify ALL trackers if connected
-    if (sessionData.trackerSocketIds && sessionData.trackerSocketIds.length > 0) {
-      sessionData.trackerSocketIds.forEach(trackerSocketId => {
-        const trackerSocket = io.sockets.sockets.get(trackerSocketId);
-        if (trackerSocket) {
-          trackerSocket.emit('checkInReceived', { sessionToken, timestamp: now });
-        }
+      socket.emit('timersSet', { 
+        reminderTimeMinutes: reminderMinutes, 
+        alertTimeMinutes: alertMinutes, 
+        reminderTimeEnd: sessionData.reminderTimeEnd, 
+        alertTimeEnd: sessionData.alertTimeEnd 
       });
     }
     
     sessions.set(sessionToken, sessionData);
+    // Save to Redis after update
+    await saveSessionToRedis(sessionToken, sessionData);
     socket.emit('checkInConfirmed', { timestamp: now });
     console.log(`Check-in received for session: ${sessionToken}`);
   });
 
-  // Tracked person sets reminder and alert times
-  socket.on('setTimers', ({ sessionToken, reminderTimeMinutes, alertTimeMinutes }) => {
-    if (!sessions.has(sessionToken)) {
+  // Tracked person sets reminder and alert times (on-demand mode - no server-side timers)
+  socket.on('setTimers', async ({ sessionToken, reminderTimeMinutes, alertTimeMinutes }) => {
+    // Check memory first, then Redis
+    let sessionData = sessions.get(sessionToken);
+    
+    if (!sessionData) {
+      // Try loading from Redis
+      sessionData = await loadSessionFromRedis(sessionToken);
+      if (sessionData) {
+        // Restore to memory
+        sessions.set(sessionToken, sessionData);
+      }
+    }
+    
+    if (!sessionData) {
       socket.emit('error', 'Invalid session token');
       return;
     }
-
-    const sessionData = sessions.get(sessionToken);
-    if (sessionData.trackedSocketId !== socket.id) {
-      socket.emit('error', 'Not authorized');
-      return;
-    }
-
-    // Clear existing timers
-    if (reminderTimers.has(sessionToken)) {
-      clearTimeout(reminderTimers.get(sessionToken));
-      reminderTimers.delete(sessionToken);
-    }
-    if (alertTimers.has(sessionToken)) {
-      clearTimeout(alertTimers.get(sessionToken));
-      alertTimers.delete(sessionToken);
-    }
+    // In on-demand mode, we're more lenient - just verify sessionToken matches
 
     const now = Date.now();
     const lastCheckIn = sessionData.lastCheckIn || now;
     
-    // Set reminder timer (for tracked person)
+    // Calculate timer end times (client will handle timers)
     const reminderTimeEnd = lastCheckIn + (reminderTimeMinutes * 60 * 1000);
-    const reminderTimer = setTimeout(() => {
-      const currentSessionData = sessions.get(sessionToken);
-      if (currentSessionData && currentSessionData.trackedSocketId) {
-        const trackedSocket = io.sockets.sockets.get(currentSessionData.trackedSocketId);
-        if (trackedSocket) {
-          trackedSocket.emit('reminderTimeReached', { sessionToken, timestamp: Date.now() });
-        }
-      }
-      reminderTimers.delete(sessionToken);
-      console.log(`Reminder timer expired for session: ${sessionToken}`);
-    }, reminderTimeEnd - now);
-    
-    reminderTimers.set(sessionToken, reminderTimer);
-
-    // Set alert timer (for tracker)
     const alertTimeEnd = lastCheckIn + (alertTimeMinutes * 60 * 1000);
-    const alertTimer = setTimeout(() => {
-      const currentSessionData = sessions.get(sessionToken);
-      if (currentSessionData && currentSessionData.trackerSocketIds && currentSessionData.trackerSocketIds.length > 0) {
-        // Notify ALL trackers
-        let notifiedAny = false;
-        currentSessionData.trackerSocketIds.forEach(trackerSocketId => {
-          const trackerSocket = io.sockets.sockets.get(trackerSocketId);
-          if (trackerSocket) {
-            trackerSocket.emit('checkInMissed', { sessionToken, timestamp: Date.now() });
-            notifiedAny = true;
-          }
-        });
-        if (!notifiedAny) {
-          pendingAlerts.set(sessionToken, { timestamp: Date.now() });
-        }
-      } else {
-        // Store alert for when tracker connects
-        pendingAlerts.set(sessionToken, { timestamp: Date.now() });
-      }
-      alertTimers.delete(sessionToken);
-      console.log(`Alert timer expired for session: ${sessionToken}`);
-    }, alertTimeEnd - now);
-    
-    alertTimers.set(sessionToken, alertTimer);
 
     sessionData.reminderTimeMinutes = reminderTimeMinutes;
     sessionData.alertTimeMinutes = alertTimeMinutes;
@@ -453,9 +576,11 @@ io.on('connection', (socket) => {
     sessionData.alertTimeEnd = alertTimeEnd;
     sessionData.settingsConfigured = true;
     sessions.set(sessionToken, sessionData);
+    // Save to Redis after update
+    await saveSessionToRedis(sessionToken, sessionData);
     
     socket.emit('timersSet', { reminderTimeMinutes, alertTimeMinutes, reminderTimeEnd, alertTimeEnd });
-    console.log(`Timers set for session: ${sessionToken}, reminder: ${reminderTimeMinutes}min, alert: ${alertTimeMinutes}min`);
+    console.log(`Timers set for session: ${sessionToken}, reminder: ${reminderTimeMinutes}min, alert: ${alertTimeMinutes}min (on-demand mode)`);
   });
 
   // Handle disconnection

@@ -1,14 +1,58 @@
+# Dependencies
 node_modules/
-.DS_Store
-*.log
+package-lock.json
+
+# Environment variables
 .env
 .env.local
+.env.*
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build outputs
 dist/
 build/
 .cache/
+
+# Frontend/Client files (not needed for backend)
+public/
+assets/
+icons/
+*.html
+*.css
+
+# Mobile app files (not needed for backend)
 android/
 ios/
+capacitor.config.json
+capacitor.config.ts
+generate-assets.js
 *.jks
 *.keystore
 key.properties
-capacitor.config.ts
+local.properties
+
+# Test files
+test-*.js
+*.test.js
+
+# Old/unused
+functions/
+Procfile
+
+# Documentation (keep only backend-related)
+*.md
+!REDIS_SETUP.md
+!README.md
+
+# Backend sensitive files
+*.pem
+*.key
+secrets/
+credentials/
